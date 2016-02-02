@@ -105,6 +105,11 @@ class FunctionAdmin(BaseAdmin):
 class MandateAdmin(BaseAdmin):
     pass
 
+@admin.register(Inquiry)
+class Inquiryadmin(BaseAdmin):
+    list_display = (
+        'title', 'legislative_period', 'parl_id', 'category')
+    pass
 
 @admin.register(Petition)
 class PetitionAdmin(BaseAdmin):
@@ -122,3 +127,19 @@ class DebateStatementAdmin(BaseAdmin):
 @admin.register(Debate)
 class DebateStatementAdmin(BaseAdmin):
     list_display = ('title', 'date', 'protocol_url')
+
+
+@admin.register(Subscription)
+class SubscriptionAdmin(BaseAdmin):
+    list_display = ['title', 'user_email']
+
+    def title(self, obj):
+        return obj.content.title
+
+    def user_email(self, obj):
+        return obj.user.email
+
+@admin.register(SubscribedContent)
+class SubscribedContentAdmin(BaseAdmin):
+    list_display = ('title', 'url')
+

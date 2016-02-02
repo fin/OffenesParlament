@@ -13,7 +13,10 @@ from urllib import urlencode
 
 from scrapy import log
 
+import pytz
+
 from parlament.spiders import BaseSpider
+from parlament.resources.extractors import *
 from parlament.resources.extractors.petition import *
 from parlament.resources.extractors.opinion import *
 
@@ -79,7 +82,7 @@ class PetitionsSpider(BaseSpider):
         if self.LLP:
             for i in self.LLP:
                 for nrbr in ['NR', 'BR']:
-                    for bbet in ['BI', 'PET', 'VOLKBG']:
+                    for bbet in ['BI', 'PET', 'PET-BR', 'VOLKBG']:
                         roman_numeral = roman.toRoman(i)
                         options = self.URLOPTIONS.copy()
                         options['GP'] = roman_numeral
@@ -100,6 +103,7 @@ class PetitionsSpider(BaseSpider):
         # Extract fields
         title = LAW.TITLE.xt(response)
         parl_id = LAW.PARL_ID.xt(response)
+        ts = GENERIC.TIMESTAMP.xt(response)
 
         if not (u'BI' in parl_id or u'PET' in parl_id):
             # VBG have their parl_id only in the url
@@ -107,8 +111,18 @@ class PetitionsSpider(BaseSpider):
 
         status = LAW.STATUS.xt(response)
 
-        LLP = LegislativePeriod.objects.get(
-            roman_numeral=response.url.split('/')[-4])
+        raw_llp = response.url.split('/')[-4]
+        if raw_llp != u'BR':
+            LLP = LegislativePeriod.objects.get(
+                roman_numeral=raw_llp)
+        else:
+            LLP = None
+
+        if not self.has_changes(parl_id, LLP, response.url, ts):
+            self.logger.info(
+                green(u"Skipping Petition, no changes: {}".format(
+                    title)))
+            return
 
         # save ids and stuff for internals
         if LLP not in self.idlist:
@@ -148,6 +162,7 @@ class PetitionsSpider(BaseSpider):
                 'signing_url': signing_url,
                 'signature_count': signature_count,
                 'reference': reference,
+                'ts': ts
             }
         )
 
@@ -189,9 +204,8 @@ class PetitionsSpider(BaseSpider):
 
                 callback_requests.append(post_req)
 
-        # Only BI or PET have online signatures
-        if u'BI' in parl_id or u'PET' in parl_id:
-            # http://www.parlament.gv.at/PAKT/VHG/XXV/BI/BI_00040/filter.psp?xdocumentUri=/PAKT/VHG/XXV/BI/BI_00040/index.shtml&GP_CODE=XXV&ITYP=BI&INR=40&FBEZ=BI_001&pageNumber=&STEP=
+        # Only BI or PET (but not PET-BR) have online signatures
+        if u'BI' in parl_id or u'PET' in parl_id and not u'PET-BR' in parl_id:
             signatures_base_url = '{}/PAKT/VHG/{}/{}/{}/filter.psp?xdocumentUri=/PAKT/VHG/{}/{}/{}/'\
                 'index.shtml&GP_CODE={}&ITYP={}&INR={}&FBEZ=BI_001&R_1000=ALLE&STEP=&pageNumber='
 
@@ -216,6 +230,22 @@ class PetitionsSpider(BaseSpider):
             len(callback_requests))), level=log.INFO)
 
         return callback_requests
+
+    def has_changes(self, parl_id, legislative_period, source_link, ts):
+        if not Petition.objects.filter(
+            parl_id=parl_id,
+            legislative_period=legislative_period,
+            source_link=source_link
+        ).exists():
+            return True
+
+        ts = ts.replace(tzinfo=pytz.utc)
+        if Petition.objects.get(
+                parl_id=parl_id,
+                legislative_period=legislative_period,
+                source_link=source_link).ts != ts:
+            return True
+        return False
 
     def parse_keywords(self, response):
         """
@@ -459,7 +489,7 @@ class PetitionsSpider(BaseSpider):
             llp = LegislativePeriod.objects.get(
                 roman_numeral=reference[0])
             ref = Petition.objects.filter(
-                law__legislative_period=llp, law__parl_id=reference[1])
+                legislative_period=llp, parl_id=reference[1])
             if len(ref) == 1:
                 return ref[0]
 
@@ -479,7 +509,8 @@ class PetitionsSpider(BaseSpider):
         # find latest saved signature date
         last_signature_date = datetime.date.fromtimestamp(0)
         try:
-            last_signature_date = petition.petition_signatures.latest('date').date
+            last_signature_date = petition.petition_signatures.latest(
+                'date').date
             log.msg(u'Latest signature date saved: {}'.format(
                 green(u'{}'.format(last_signature_date))
             ))
@@ -490,20 +521,24 @@ class PetitionsSpider(BaseSpider):
         count_bulk_create = 0
 
         # signatures on the latest saved date
-        signatures_ondate = [sig for sig in signatures if sig['date'] == last_signature_date]
+        signatures_ondate = [
+            sig for sig in signatures if sig['date'] == last_signature_date]
         for signature in signatures_ondate:
             petition_signature, created = PetitionSignature.objects.get_or_create(
                 petition=petition, **signature)
             if created:
                 count_created += 1
 
-        signatures_afterdate = [sig for sig in signatures if sig['date'] > last_signature_date]
+        signatures_afterdate = [
+            sig for sig in signatures if sig['date'] > last_signature_date]
         # remove duplicates as pre-processing step for bulk_create
-        # code for de-duplication for list of dicts used from: http://stackoverflow.com/a/6281063/331559
-        signatures_afterdate = [dict(y) for y in set(tuple(x.items()) for x in signatures_afterdate)]
+        # code for de-duplication for list of dicts used from:
+        # http://stackoverflow.com/a/6281063/331559
+        signatures_afterdate = [
+            dict(y) for y in set(tuple(x.items()) for x in signatures_afterdate)]
         signature_items = []
         for signature in signatures_afterdate:
-            signature_item = PetitionSignature(petition=petition,**signature)
+            signature_item = PetitionSignature(petition=petition, **signature)
             signature_items.append(signature_item)
             count_bulk_create += 1
 
