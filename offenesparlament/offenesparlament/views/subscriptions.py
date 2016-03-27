@@ -2,13 +2,14 @@
 from django.shortcuts import redirect
 from django.core.urlresolvers import reverse
 from django.contrib import messages
+from django.http import HttpResponse
 from op_scraper.models import User
 from op_scraper.models import SubscribedContent
 from op_scraper.models import Subscription
 from op_scraper.models import Verification
 from offenesparlament.constants import EMAIL
 from offenesparlament.constants import MESSAGES
-
+from offenesparlament.forms import SubscriptionsLoginForm
 
 from django.shortcuts import render
 
@@ -16,6 +17,24 @@ import xxhash
 import requests
 import uuid
 import json
+
+# import the logging library
+import logging
+
+# Get an instance of a logger
+logger = logging.getLogger(__name__)
+
+
+def login(request):
+    if request.method == 'POST':
+        form = SubscriptionsLoginForm(request.POST)
+        if form.is_valid():
+            email = form.cleaned_data['email']
+            return redirect('list_subscriptions', email=email)
+    else:
+        form = SubscriptionsLoginForm()
+
+    return render(request, 'subscription/login.html', {'form': form})
 
 
 def verify(request, email, key):
@@ -54,7 +73,7 @@ def list(request, email, key=None):
         if not key:
             list_url = request.build_absolute_uri(
                 reverse(
-                    'list',
+                    'list_subscriptions',
                     kwargs={
                         'email': email,
                         'key': user.verification.verification_hash}
@@ -81,7 +100,7 @@ def list(request, email, key=None):
                 }
             )
     else:
-        message = MESSAGES.EMAIL.EMAIL_NOT_FOUND.format(email)
+        message = MESSAGES.EMAIL.SUBSCRIPTION_LINK_SENT.format(email)
         return render(request, 'subscription/list_subscriptions.html', {'message': message})
 
 
@@ -103,12 +122,12 @@ def unsubscribe(request, email, key):
         message = MESSAGES.EMAIL.SUBSCRIPTION_DELETED.format(content.url)
 
         sub.delete()
-        if content.subscription_set.count() == 0:
+        if content.subscriptions.count() == 0:
             content.delete()
 
         list_subscriptions_link = request.build_absolute_uri(
             reverse(
-                'list',
+                'list_subscriptions',
                 kwargs={
                     'email': email,
                     'key': user.verification.verification_hash}
@@ -132,9 +151,14 @@ def subscribe(request):
     """
     Subcribe the given email to the given URL.
     """
-    url = request.build_absolute_uri(request.POST['subscription_url'])
+    # we must unset the limiting for accurate results
+    url = request.build_absolute_uri(
+        request.POST['subscription_url']) + "&limit=-1&fieldset=all"
     title = request.POST['subscription_title']
     email = request.POST['email']
+    category = request.POST[
+        'category'] if 'category' in request.POST else 'search'
+    ui_url = request.build_absolute_uri(request.POST['search_ui_url'])
 
     user, created_user = User.objects.get_or_create(email=email)
     if created_user:
@@ -145,17 +169,17 @@ def subscribe(request):
         user.verification = user_verification
         user.save()
 
-    content, created_content = SubscribedContent.objects.get_or_create(url=url, title=title)
+    content_default = {
+        'title': title,
+        'ui_url': ui_url
+    }
+    content, created_content = SubscribedContent.objects.get_or_create(
+        url=url, defaults=content_default)
     if created_content:
-        content_response = requests.get(url)
-        es_response = json.loads(content_response.text)
-        content_hashes = []
-        for res in es_response['result']:
-            content_hashes.append({
-                'parl_id': res['parl_id'],
-                'hash': xxhash.xxh64(json.dumps(res)).hexdigest(),
-            })
-        content.latest_content_hashes = json.dumps(content_hashes)
+        hashes = content.generate_content_hashes()
+        content.latest_content_hashes = hashes
+        content.latest_content = content.get_content()
+        content.category = category
         content.save()
 
     if not Subscription.objects.filter(user=user, content=content).exists():
@@ -179,6 +203,13 @@ def subscribe(request):
             verification=verification_item
         )
 
+        logger.info(u"Created subscription of {} (category '{}') for {} with a subscribe link of {} ".format(
+            title,
+            category,
+            email,
+            verification_url
+        ))
+
         email_sent = EMAIL.VERIFY_SUBSCRIPTION.send(
             email, {'verification_url': verification_url})
         if email_sent:
@@ -189,5 +220,4 @@ def subscribe(request):
     else:
         message = MESSAGES.EMAIL.ALREADY_SUBSCRIBED
 
-    messages.add_message(request, messages.INFO, message)
-    return redirect(request.META['HTTP_REFERER'], {'message': message})
+    return HttpResponse(message)

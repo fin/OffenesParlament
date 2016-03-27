@@ -5,8 +5,17 @@ from django.utils.html import remove_tags
 from django.core.urlresolvers import reverse
 from phonenumber_field.modelfields import PhoneNumberField
 from annoying import fields
+from django.contrib.postgres.fields import ArrayField
 import re
 import json
+import xxhash
+import requests
+
+# import the logging library
+import logging
+
+# Get an instance of a logger
+logger = logging.getLogger(__name__)
 
 
 class ParlIDMixIn(object):
@@ -14,6 +23,11 @@ class ParlIDMixIn(object):
     @property
     def parl_id_urlsafe(self):
         return self.parl_id.replace('/', '-').replace('(', '').replace(')', '').replace(' ', '_')
+
+
+class CONSTANTS():
+    PETITIONS_LINK_NAME = "petitions"
+    LAWS_LINK_NAME = "gesetze"
 
 
 class Timestamped(models.Model):
@@ -44,12 +58,12 @@ class LegislativePeriod(models.Model):
 
     def __unicode__(self):
         if self.end_date:
-            rep_str = "{} ({} - {})".format(
+            rep_str = u"{} ({} – {})".format(
                 self.roman_numeral,
                 self.start_date,
                 self.end_date)
         else:
-            rep_str = "{} (seit {})".format(
+            rep_str = u"{} (seit {})".format(
                 self.roman_numeral,
                 self.start_date)
 
@@ -58,16 +72,23 @@ class LegislativePeriod(models.Model):
     @property
     def facet_repr(self):
         if self.end_date:
-            rep_str = "{} - {} ({})".format(
+            rep_str = u"{} – {} ({})".format(
                 self.start_date,
                 self.end_date,
                 self.roman_numeral)
         else:
-            rep_str = "aktuell seit {} ({})".format(
+            rep_str = u"aktuell seit {} ({})".format(
                 self.start_date,
                 self.roman_numeral)
 
         return rep_str
+
+    @classmethod
+    def get(cls, roman_numeral):
+        try:
+            return LegislativePeriod.objects.filter(roman_numeral=roman_numeral).get()
+        except:
+            return None
 
 
 class Phase(models.Model):
@@ -273,11 +294,24 @@ class Law(Timestamped, ParlIDMixIn):
 
     @property
     def llp_roman(self):
-        return self.legislative_period.roman_numeral
+        if self.legislative_period:
+            return self.legislative_period.roman_numeral
+        else:
+            return None
 
     @property
     def llps_facet(self):
-        return [self.legislative_period.facet_repr]
+        if self.legislative_period:
+            return [self.legislative_period.facet_repr]
+        else:
+            return []
+
+    @property
+    def llps_facet_numeric(self):
+        if self.legislative_period:
+            return [self.legislative_period.number]
+        else:
+            return []
 
     @property
     def keyword_titles(self):
@@ -293,13 +327,21 @@ class Law(Timestamped, ParlIDMixIn):
     @property
     def slug(self):
         if not self._slug:
-            self._slug = reverse(
-                'gesetz_detail',
-                kwargs={
-                    'parl_id': self.parl_id_urlsafe,
-                    'ggp': self.llp_roman
-                }
-            )
+            if self.llp_roman:
+                self._slug = reverse(
+                    'gesetz_detail',
+                    kwargs={
+                        'parl_id': self.parl_id_urlsafe,
+                        'ggp': self.llp_roman
+                    }
+                )
+            else:
+                self._slug = reverse(
+                    'gesetz_detail',
+                    kwargs={
+                        'parl_id': self.parl_id_urlsafe
+                    }
+                )
             self.save()
 
         return self._slug
@@ -380,7 +422,11 @@ class Party(models.Model):
     """
     A political party, or 'Klub'
     """
-    titles = fields.JSONField(blank=True, null=True, default=[])
+    titles = ArrayField(
+        models.CharField(max_length=255),
+        blank=True,
+        null=True)
+
     short = models.CharField(max_length=255, unique=True)
 
     def __unicode__(self):
@@ -440,6 +486,19 @@ class Mandate(models.Model):
 
         return None
 
+    def earliest_start_date(self):
+
+        if self.start_date:
+            return self.start_date
+
+        if self.legislative_period and self.legislative_period.start_date:
+            return self.legislative_period.start_date
+
+        if self.administration and self.administration.start_date:
+            return self.administration.start_date
+
+        return None
+
 
 class Person(Timestamped, ParlIDMixIn):
 
@@ -491,6 +550,10 @@ class Person(Timestamped, ParlIDMixIn):
     def llps_facet(self):
         return [llp.facet_repr for llp in self.llps]
 
+    @property
+    def llps_facet_numeric(self):
+        return [llp.number for llp in self.llps]
+
     def get_latest_mandate(self):
         """
         Returns the most recent mandate a person had.
@@ -529,6 +592,115 @@ class Person(Timestamped, ParlIDMixIn):
 
         return self._slug
 
+    # JSON for ES Index Generation
+    @property
+    def mandates_json(self):
+        mandates = []
+        for mand in self.mandates.all():
+            mandate = {}
+            mandate['llp'] = unicode(mand.legislative_period)
+
+            # If we have given start- and end-dates, take them
+            # else take the ones from the legislative period
+            if mand.start_date or mand.end_date:
+                mandate['start_date'] = mand.start_date.isoformat()
+                mandate[
+                    'end_date'] = mand.end_date.isoformat() if mand.end_date else None
+            elif mand.legislative_period:
+                llp = mand.legislative_period
+                mandate['start_date'] = llp.start_date.isoformat()
+                mandate[
+                    'end_date'] = llp.end_date.isoformat() if llp.end_date else None
+
+            if mand.administration:
+                adm = mand.administration
+                mandate['administration'] = {
+                    "title": adm.title,
+                    "start_date": adm.start_date.isoformat(),
+                    "end_date": adm.end_date.isoformat() if adm.end_date else None,
+                }
+                mandate['start_date'] = adm.start_date.isoformat()
+                mandate[
+                    'end_date'] = adm.end_date.isoformat() if adm.end_date else None
+
+            if mand.function:
+                mandate['function'] = {
+                    "title": mand.function.title,
+                    "short": mand.function.short,
+                }
+            if mand.state:
+                mandate['state'] = {
+                    "title": mand.state.title,
+                    "name": mand.state.name,
+                }
+            if mand.party:
+                mandate['party'] = {
+                    "titles": mand.party.titles,
+                    "short": mand.party.short,
+                    "short_css_class": mand.party.short_css_class,
+                }
+
+            mandates.append(mandate)
+        return json.dumps(mandates)
+
+    @property
+    def statements_json(self):
+        statements = []
+        for st in self.statements.all():
+            statement = {
+                "type": st.speech_type,
+                "date": st.step.date.isoformat(),
+                "law": st.step.law.title if st.step.law else None,
+                "law_id": st.step.law.id if st.step.law else None,
+                "law_category": st.step.law.category.title if st.step.law else None,
+                "law_slug": st.step.law.slug if st.step.law else None,
+                "protocol_url": st.protocol_url,
+            }
+            if st.protocol_url and self.debate_statements.count():
+                try:
+                    page_number = int(
+                        re.match('^.*SEITE_(\d+).*$', st.protocol_url).group(1))
+
+                    dsq = self.debate_statements\
+                        .filter(page_start=page_number)\
+                        .filter(date__year=st.step.date.year)\
+                        .filter(date__month=st.step.date.month)\
+                        .filter(date__day=st.step.date.day)
+                    if dsq.count() >= 1:
+                        statement['debate_statement'] = [
+                            ds.id for ds in dsq.all()]
+                    elif not dsq.count():
+                        # no matching debatestatement found
+                        pass
+                except:
+                    # something went wrong
+                    # logger.warn("Problem finding debate_statement: {}".format(
+                    #     e.message))
+                    pass
+            statements.append(statement)
+        return json.dumps(statements)
+
+    @property
+    def debate_statements_json(self):
+        debate_statements = []
+        for st in self.debate_statements.all():
+            statement = {
+                'id': st.id,
+                'speaker_role': st.speaker_role,
+                'full_text': st.full_text,
+                'annotated_text': st.annotated_text,
+                'text_type': st.text_type,
+                'datetime': st.date.isoformat(),
+                'debate_title': st.debate.title,
+                'debate_date': st.debate.date.date().isoformat(),
+                'debate_type': st.debate.debate_type,
+                'debate_llp': st.debate.llp.facet_repr,
+                'debate_protocol_url': st.debate.protocol_url,
+                'debate_detail_url': st.debate.detail_url,
+            }
+            debate_statements.append(statement)
+        return json.dumps(debate_statements)
+
 
 class InquiryResponse(Law):
     sender = models.ForeignKey(
@@ -554,7 +726,10 @@ class Inquiry(Law):
 
     @property
     def llp_roman(self):
-        return self.legislative_period.roman_numeral
+        if self.legislative_period:
+            return self.legislative_period.roman_numeral
+        else:
+            return None
 
 
 class Step(models.Model):
@@ -573,8 +748,6 @@ class Step(models.Model):
     law = models.ForeignKey(Law, null=True, blank=True, related_name='steps')
     opinion = models.ForeignKey(
         Opinion, null=True, blank=True, related_name='steps')
-    inquiry = models.ForeignKey(
-        Inquiry, null=True, blank=True, related_name='steps_inquiry')
 
     def __unicode__(self):
         try:
@@ -589,7 +762,7 @@ class Statement(models.Model):
     A Person's statemtn or comment as part of a Step
     """
     speech_type = models.CharField(max_length=255)
-    protocol_url = models.URLField(max_length=255, default="")
+    protocol_url = models.URLField(max_length=255, default="", null=True)
     index = models.IntegerField(default=1)
 
     # Relationships
@@ -643,12 +816,45 @@ class SubscribedContent(models.Model):
     A news- or page-subscription
     """
     url = models.URLField(max_length=255, unique=True)
+    ui_url = models.URLField(max_length=255, null=True, blank=True)
 
     latest_content_hashes = models.TextField(null=True, blank=True)
+    latest_content = models.TextField(null=True, blank=True)
     title = models.CharField(max_length=255, default="")
+    single = models.BooleanField(default=False)
+    category = models.CharField(max_length=255, default="search")
 
     # Relationships
     users = models.ManyToManyField(User, through="Subscription")
+
+    def get_content(self):
+        """
+        Executes a request to ES for this subscription's search URL
+
+        Returns the textual response (json in string)
+        """
+        content_response = requests.get(self.url)
+        return content_response.text
+
+    def generate_content_hashes(self, content=None):
+        """
+        Generate a dictionary which maps parl_ids to their respective hashes
+
+        Used for speedy comparison of changes
+        """
+        if not content:
+            es_response = json.loads(self.get_content())
+        else:
+            try:
+                es_response = json.loads(content)
+            except:
+                es_response = json.loads(self.get_content())
+
+        content_hashes = {}
+        for res in es_response['result']:
+            content_hashes[res['parl_id']] = xxhash.xxh64(
+                json.dumps(res)).hexdigest()
+        return json.dumps(content_hashes)
 
 
 class Subscription(models.Model):
@@ -657,7 +863,8 @@ class Subscription(models.Model):
     A single subscription of content for a user
     """
     user = models.ForeignKey(User)
-    content = models.ForeignKey(SubscribedContent)
+    content = models.ForeignKey(
+        SubscribedContent, related_name='subscriptions')
 
     # Relationships
     verification = models.OneToOneField(Verification, null=True, blank=True)
@@ -696,6 +903,10 @@ class Petition(Law):
     # Relationships
     reference = models.OneToOneField(
         "self", blank=True, null=True, related_name='redistribution')
+
+    def real_slug(self):
+        # slug contains a link to the law-detail page (gesetze)
+        return self.slug.replace(CONSTANTS.LAWS_LINK_NAME, CONSTANTS.PETITIONS_LINK_NAME)
 
     def __unicode__(self):
         return u'{} eingebracht von {}'.format(
@@ -775,6 +986,24 @@ class Debate(models.Model):
     nr = models.IntegerField(null=True)
     llp = models.ForeignKey(LegislativePeriod, null=True, blank=True)
 
+    @property
+    def statements_full_text(self):
+        return [
+            [
+                st.index,
+                st.doc_section,
+                st.text_type,
+                st.time_start,
+                st.time_end,
+                st.person.parl_id if st.person else None,
+                st.speaker_role,
+                st.speaker_name,
+                st.full_text
+            ]
+            for st
+            in self.debate_statements.order_by('index').all()
+        ]
+
     def __unicode__(self):
         return self.title
 
@@ -786,7 +1015,8 @@ class DebateStatement(models.Model):
     """
 
     # Datime from the debate date + the most recent timestamp found in debate
-    date = models.DateTimeField(null=True)
+    date = models.DateTimeField(null=True, blank=True)
+    date_end = models.DateTimeField(null=True, blank=True)
 
     # Ref. to debate
     debate = models.ForeignKey(Debate, null=True,
@@ -809,6 +1039,9 @@ class DebateStatement(models.Model):
     page_start = models.IntegerField(null=True)
     page_end = models.IntegerField(null=True)
 
+    time_start = models.CharField(max_length=12, null=True, blank=True)
+    time_end = models.CharField(max_length=12, null=True, blank=True)
+
     # Cleaned text, will then contain only the statement of the speaker
     full_text = models.TextField(null=True)
 
@@ -824,9 +1057,6 @@ class DebateStatement(models.Model):
                                related_name='debate_statements')
     # Name of speaker (useful for cases without person-ref for speaker?)
     speaker_name = models.CharField(max_length=255, null=True)
-
-    # For debug reasons, can contain extracted data as JSON string
-    debugdump = models.TextField(null=True)
 
     def __unicode__(self):
         return u'{}, {}-{}, {}'.format(

@@ -43,12 +43,12 @@ class BaseConfig(Configuration):
         'haystack',
         'op_scraper',
         'annoying',
-        'reversion',
         'django_extensions',
         'django_bootstrap_breadcrumbs',
         'import_export',
         'jsonify',
         'djcelery',
+        'django_inlinecss',
     )
 
     MIDDLEWARE_CLASSES = (
@@ -71,6 +71,8 @@ class BaseConfig(Configuration):
             'ENGINE': 'offenesparlament.search_backend.FuzzyElasticsearchSearchEngine',
             'URL': 'http://localhost:9200/',
             'INDEX_NAME': 'haystack',
+            'TIMEOUT': 120,
+            'BATCH_SIZE': 50,
         },
     }
 
@@ -160,7 +162,10 @@ class Dev(BaseConfig):
     BROKER_URL = 'amqp://offenesparlament:op_dev_qwerty@offenesparlament.vm:5672//'
     #CELERY_RESULT_BACKEND = 'amqp'
 
-    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+    # EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+    EMAIL_BACKEND = 'django.core.mail.backends.filebased.EmailBackend'
+    EMAIL_FILE_PATH = '/vagrant/ignore/log/mails' # change this to a proper location
+
 
     # Workaround for the ReactorNotRestartable issue described here:
     # http://stackoverflow.com/questions/22116493/run-a-scrapy-spider-in-a-celery-task
@@ -174,7 +179,7 @@ class Dev(BaseConfig):
                 'class': 'logging.StreamHandler',
             },
             'null': {
-                'level': 'DEBUG',
+                'level': 'INFO',
                 'class': 'django.utils.log.NullHandler',
             },
         },
@@ -186,7 +191,7 @@ class Dev(BaseConfig):
             'django.db.backends': {
                 'handlers': ['null'],  # Quiet by default!
                 'propagate': False,
-                'level': 'DEBUG',
+                'level': 'INFO',
             },
         },
     }

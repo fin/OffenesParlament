@@ -5,7 +5,7 @@ from django.http import HttpResponse
 
 from haystack.query import SearchQuerySet
 
-from op_scraper.models import Person, Law
+from op_scraper.models import Person, Law, Debate
 from offenesparlament.constants import ES_DEFAULT_LIMIT
 
 # import the logging library
@@ -29,7 +29,9 @@ class JsonSearchView(SearchView):
     """Base SearchView that returns json-data"""
 
     search_model = None
-    facet_fields = {}
+    facet_fields = {
+        'llps': {'type': 'field'},
+    }
 
     def __init__(self, search_model=None):
         super(JsonSearchView, self).__init__()
@@ -43,9 +45,29 @@ class JsonSearchView(SearchView):
         query_args = {
             'facet_filters': {}
         }
+
+        if 'fieldset' in request.GET:
+            query_args['fieldset'] = request.GET['fieldset']
+
+        if 'only_facets' in request.GET:
+            query_args['only_facets'] = True
+
+        for facet_field in self.facet_fields:
+            if facet_field in request.GET and request.GET[facet_field]:
+                query_args['facet_filters'][
+                    facet_field] = request.GET[facet_field]
+
         # Do we have a query or are we just getting all of them?
         if 'q' in request.GET and request.GET['q']:
             query_args['q'] = request.GET['q']
+        # Do we want a single item (parl_id, parl_id + llp)?
+        elif 'parl_id' in request.GET and request.GET['parl_id']:
+            query_args['parl_id'] = request.GET['parl_id']
+            if 'llp_numeric' in request.GET and request.GET['llp_numeric']:
+                query_args['llp_numeric'] = request.GET['llp_numeric']
+            # In case of a single item, return immediately and ignore all other
+            # parameters
+            return query_args
 
         query_args['offset'] = 0
         if 'offset' in request.GET and request.GET['offset']:
@@ -57,23 +79,18 @@ class JsonSearchView(SearchView):
                         request.GET['offset']))
                 pass
 
-        query_args['limit'] = ES_DEFAULT_LIMIT
         if 'limit' in request.GET and request.GET['limit']:
             try:
-                query_args['limit'] = int(request.GET['limit'])
+                limit = int(request.GET['limit'])
+                if limit > 0:
+                    query_args['limit'] = limit
             except ValueError:
                 logging.warn(
-                    "Illegal query argument received: offset={}".format(
-                        request.GET['offset']))
+                    "Illegal query argument received: limit={}".format(
+                        request.GET['limit']))
                 pass
-
-        if 'only_facets' in request.GET:
-            query_args['only_facets'] = True
-
-        for facet_field in self.facet_fields:
-            if facet_field in request.GET and request.GET[facet_field]:
-                query_args['facet_filters'][
-                    facet_field] = request.GET[facet_field]
+        else:
+            query_args['limit'] = ES_DEFAULT_LIMIT
 
         return query_args
 
@@ -83,29 +100,53 @@ class JsonSearchView(SearchView):
             self.search_model, [query_args]))
 
         (result, facet_counts) = self.get_queryset(query_args)
-
+        stats = {'num_results': result.count() if result else None}
         # don't limit/offset empty results when we only return facets
         if 'only_facets' not in query_args:
-            # calculate offset end
-            start_index = query_args['offset']
-            end_index = query_args[
-                'offset'] + query_args['limit'] if query_args['limit'] else None
-            # combine results and facets, limit and offset as given as
-            # parameters
-            result_list = [
-                sr.get_stored_fields() for sr in
-                result[start_index:end_index]]
+            if 'limit' in query_args and query_args['limit']:
+                # calculate offset end
+                start_index = query_args['offset']
+                end_index = query_args[
+                    'offset'] + query_args['limit']
+                # combine results and facets, limit and offset as given as
+                # parameters
+                result = result[start_index:end_index]
+
+            if 'fieldset' in query_args:
+                result_list = self.build_result_set(
+                    result, query_args['fieldset'])
+            else:
+                result_list = self.build_result_set(result)
+            # result_list = [
+            #     sr.get_stored_fields() for sr in
+            #     result]
         else:
             result_list = []
 
         result = {
             'result': result_list,
-            'facets': facet_counts
+            'stats': stats
         }
+        if facet_counts:
+            result['facets'] = facet_counts
 
         json_result = json.dumps(result, cls=QuerySetEncoder)
 
         return HttpResponse(json_result, content_type='application/json')
+
+    def build_result_set(self, result, set_name='list'):
+
+        result_list = []
+        for sr in result:
+            # reset the default in case we don't know that fieldset
+            if set_name not in sr.searchindex.FIELDSETS:
+                set_name = 'list'
+            result_list_entry = {}
+
+            for field in sr.searchindex.FIELDSETS[set_name]:
+                result_list_entry[field] = getattr(sr, field)
+            result_list.append(result_list_entry)
+        return result_list
 
     def get_queryset(self, query_args):
         # Create new queryset
@@ -122,6 +163,11 @@ class JsonSearchView(SearchView):
             # fuzzify search
             qry = u'{}~'.format(qry.replace(' ', '~ '))
             qs = qs.auto_query(qry)
+        elif 'parl_id' in query_args:
+            qs = qs.filter(parl_id=query_args['parl_id'])
+            if 'llp_numeric' in query_args:
+                qs = qs.filter(llps_numeric=query_args['llp_numeric'])
+            return (qs.all(), None)
 
         # Filter by facets
         if query_args['facet_filters']:
@@ -132,7 +178,7 @@ class JsonSearchView(SearchView):
                 # everyone from Oberoesterreich until filtering by it again.
                 qs = qs.narrow(u"{}:{}".format(
                     facet_field,
-                    query_args['facet_filters'][facet_field])
+                    qs.query.clean(query_args['facet_filters'][facet_field]))
                 ).filter(
                     **{
                         facet_field: query_args['facet_filters'][facet_field]}
@@ -192,4 +238,16 @@ class LawSearchView(JsonSearchView):
         'category': {'type': 'field'},
         'keywords': {'type': 'field'},
         'ts': {'type': 'date'}
+    }
+
+
+class DebateSearchView(JsonSearchView):
+
+    """Search view for the Debate model"""
+
+    search_model = Debate
+    facet_fields = {
+        'llp': {'type': 'field'},
+        'debate_type': {'type': 'field'},
+        'date': {'type': 'date'}
     }

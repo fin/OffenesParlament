@@ -1,4 +1,5 @@
 _ = require 'underscore'
+moment = require 'moment'
 
 
 _human_categories =
@@ -11,6 +12,7 @@ _human_categories =
   category: 'Kategorie'
   keywords: 'Schlagwort'
   type: 'Suchtyp'
+  debate_type: 'Art der Debatte'
 
 
 module.exports =
@@ -32,4 +34,11 @@ module.exports =
     result = _.compact([llp_string, rest_terms_string]).join(': ')
     result = _.compact([type_string, result]).join(' in ')
     return result
+
+  capitalize_first_letter: (input) ->
+    return input.charAt(0).toUpperCase() + input.slice(1)
+
+  get_date: (timestamp) ->
+    mnt = moment(timestamp)
+    return mnt.format('DD.MM.YYYY')
 

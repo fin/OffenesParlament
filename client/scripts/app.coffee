@@ -1,6 +1,6 @@
 React = require 'react'
 ReactDOM = require 'react-dom'
-SearchResults = require './components/SearchResults.cjsx'
+SearchResults = require './components/results/SearchResults.cjsx'
 SubscriptionModal = require './components/SubscriptionModal.cjsx'
 SubscriptionModalStore = require './stores/SubscriptionModalStore.coffee'
 SubscriptionModalActions = require './actions/SubscriptionModalActions.coffee'
@@ -10,6 +10,7 @@ $ = require 'jquery'
 _ = require 'underscore'
 require './utils/csrf_token.coffee'
 tooltip = require 'tooltip'
+app_router = require('./utils/router.coffee')
 
 
 $(document).ready( () ->
@@ -42,6 +43,7 @@ $(document).ready( () ->
     if OFFPARL_DATA_SEARCH_TYPE?
       AnysearchActions.createTerm('type', OFFPARL_DATA_SEARCH_TYPE)
     AnysearchActions.declareSearchbarSetupComplete()
+    AnysearchActions.activateSearchbarRouting()
     ReactDOM.render(
       React.createElement(Searchbar, {}),
       anysearch_container
@@ -60,13 +62,20 @@ $(document).ready( () ->
   render_results = () ->
     results = AnysearchStore.get_search_results()
     if content_container and results
-      SearchResults = require("./components/SearchResults.cjsx")
+      document.title = AnysearchStore.get_subscription_title() + " - OffenesParlament.at"
       ReactDOM.render(
-        React.createElement(SearchResults, {results: results}),
+        React.createElement(SearchResults, {
+          results: results
+          subscription_url: AnysearchStore.get_subscription_url()
+          search_ui_url: AnysearchStore.get_search_ui_url()
+          subscription_title: AnysearchStore.get_subscription_title()
+        }),
         content_container
       )
   AnysearchStore.addChangeListener(render_results)
   render_results()
+
+  app_router.start()
 
   # modal component to display subscription-modals
   render_modal = () ->
@@ -74,7 +83,9 @@ $(document).ready( () ->
       data =
         show: SubscriptionModalStore.is_modal_shown()
         subscription_url: SubscriptionModalStore.get_subscription_url()
+        search_ui_url: AnysearchStore.get_search_ui_url()
         subscription_title: SubscriptionModalStore.get_subscription_title()
+        subscription_category: SubscriptionModalStore.get_subscription_category()
         server_status: SubscriptionModalStore.get_server_status()
         email: SubscriptionModalStore.get_email()
       ReactDOM.render(
@@ -89,7 +100,9 @@ $(document).ready( () ->
     e.preventDefault()
     btn = $(e.target)
     url = btn.data('subscription_url')
+    ui_url = btn.data('search_ui_url')
     title = btn.data('subscription_title')
-    SubscriptionModalActions.showModal(url, title)
+    category = btn.data('subscription_category')
+    SubscriptionModalActions.showModal(url, title, category)
   )
 )

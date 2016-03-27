@@ -1,5 +1,4 @@
-AppDispatcher = require('../dispatcher/AppDispatcher.coffee')
-AnysearchConstants = require('../constants/AnysearchConstants.coffee')
+app_router = require('../utils/router.coffee')
 
 
 LLP_URL_REGEXP = /^(.+)(\/)([XIVMDC]{1,})(\/)?$/
@@ -13,6 +12,12 @@ RouterActions =
       url_matches[3] = llp
       url_matches.shift()
       location.href = url_matches.join('')
+
+  changeLocation: (route) ->
+    location.href = route
+
+  changeRoute: (route) ->
+    app_router.navigate(route)
 
 
 module.exports = RouterActions

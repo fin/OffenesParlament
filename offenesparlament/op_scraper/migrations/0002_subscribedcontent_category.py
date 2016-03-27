@@ -13,7 +13,7 @@ class Migration(migrations.Migration):
     operations = [
         migrations.AddField(
             model_name='subscribedcontent',
-            name='title',
-            field=models.CharField(default=b'', max_length=255),
+            name='category',
+            field=models.CharField(default=b'search', max_length=255),
         ),
     ]

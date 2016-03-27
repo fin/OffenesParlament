@@ -43,9 +43,26 @@ AnysearchActions =
       selected_term_id: selected_term_id
     })
 
+  overrideSearch: (type, query) ->
+    AppDispatcher.dispatch({
+      actionType: AnysearchConstants.OVERRIDE_SEARCH
+      type: type
+      query: query
+    })
+
   declareSearchbarSetupComplete: () ->
     AppDispatcher.dispatch({
       actionType: AnysearchConstants.SEARCHBAR_SETUP_COMPLETE
+    })
+
+  activateSearchbarRouting: () ->
+    AppDispatcher.dispatch({
+      actionType: AnysearchConstants.SEARCHBAR_ACTIVATE_ROUTING
+    })
+
+  forceLocationChange: () ->
+    AppDispatcher.dispatch({
+      actionType: AnysearchConstants.SEARCHBAR_FORCE_LOCATION_CHANGE
     })
 
 
